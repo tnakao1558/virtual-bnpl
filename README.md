@@ -33,3 +33,37 @@
 
 - Docker / Docker Compose がインストールされていること
 - ローカル環境に PostgreSQL や psql をインストールする必要はありません
+
+## クイックスタート
+
+### 1. データベースの起動
+
+```bash
+docker compose up -d
+```
+
+### 2. データベースへの接続確認
+
+```bash
+docker compose exec db psql -U bnpl_user -d bnpl
+```
+
+接続後、テーブル一覧を確認：
+
+```sql
+\dt
+```
+
+### 3. データベースの停止
+
+```bash
+docker compose down
+```
+
+データも含めて完全に削除する場合：
+
+```bash
+docker compose down -v
+```
+
+詳細な手順は `docs/setup/database.md` を参照してください。
