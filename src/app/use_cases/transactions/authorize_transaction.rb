@@ -40,18 +40,23 @@ module UseCases
           # ④ 前提条件チェック
           validate_prerequisites(credit_account)
 
-          # ⑤ transaction 作成
-          transaction = create_transaction
-
-          # ⑥ ledger_entries 作成
+          # ⑤ ledger_entries 作成（transaction_id なし）
           # 真実の源は Ledger
           # 「枠を使った」という事実は LedgerEntry が成功した場合のみ成立する
-          create_ledger_entry(transaction)
+          # Transaction は枠確保が成功した後にのみ作成する
+          ledger_entry = create_ledger_entry_without_transaction
 
-          # ⑦ available_credit 更新と整合性検証
+          # ⑥ available_credit 更新と整合性検証
           # Ledger から再計算し、枠超過チェックと整合性検証を行う
           # 枠超過の場合は InsufficientCreditError を raise してトランザクション全体を rollback
           update_and_verify_available_credit(credit_account)
+
+          # ⑦ transaction 作成（枠確保成功後）
+          # 枠超過チェックが通った場合のみ Transaction を作成
+          transaction = create_transaction
+
+          # ⑧ ledger_entry に transaction_id を紐付ける
+          link_transaction_to_ledger_entry(ledger_entry, transaction)
 
           # ⑨ audit_logs 作成
           # action = TRANSACTION_AUTHORIZED
@@ -106,10 +111,28 @@ module UseCases
         )
       end
 
-      # ⑤ transaction 作成
+      # ⑤ ledger_entries 作成（transaction_id なし）
+      # 真実の源は Ledger
+      # type = AUTH_HOLD
+      # amount_delta = -amount
+      # transaction_id は後で紐付ける
+      # 「枠を使った」という事実は LedgerEntry が成功した場合のみ成立する
+      #
+      # @return [LedgerEntry] 作成された LedgerEntry
+      def create_ledger_entry_without_transaction
+        LedgerEntry.create!(
+          user_id:,
+          type: 'AUTH_HOLD',
+          amount_delta: -amount, # 負の値で利用枠を減らす
+          transaction_id: nil # 後で紐付ける
+        )
+      end
+
+      # ⑦ transaction 作成（枠確保成功後）
       # status = AUTHORIZED
       # currency = JPY
       # invoice_id = NULL
+      # 枠超過チェックが通った場合のみ作成される
       #
       # @return [Transaction] 作成された取引
       def create_transaction
@@ -124,20 +147,13 @@ module UseCases
         )
       end
 
-      # ⑥ ledger_entries 作成
-      # 真実の源は Ledger
-      # type = AUTH_HOLD
-      # amount_delta = -amount
-      # transaction_id を紐付ける
-      # 「枠を使った」という事実は LedgerEntry が成功した場合のみ成立する
+      # ⑧ ledger_entry に transaction_id を紐付ける
+      # Transaction 作成後に LedgerEntry の transaction_id を更新
       #
-      # @param transaction [Transaction] 取引
-      def create_ledger_entry(transaction)
-        Writers::LedgerWriter.create_auth_hold(
-          user_id:,
-          transaction_id: transaction.id,
-          amount:
-        )
+      # @param ledger_entry [LedgerEntry] LedgerEntry
+      # @param transaction [Transaction] Transaction
+      def link_transaction_to_ledger_entry(ledger_entry, transaction)
+        ledger_entry.update!(transaction_id: transaction.id)
       end
 
       # ⑦ available_credit 更新と整合性検証
