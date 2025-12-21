@@ -4,7 +4,7 @@ BEGIN;
 -- users
 -- =========================
 CREATE TABLE users (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email TEXT NOT NULL UNIQUE,
   status user_status NOT NULL DEFAULT 'ACTIVE',
   mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -15,7 +15,7 @@ CREATE TABLE users (
 -- merchants
 -- =========================
 CREATE TABLE merchants (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   status merchant_status NOT NULL DEFAULT 'ACTIVE',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -25,7 +25,7 @@ CREATE TABLE merchants (
 -- credit_accounts
 -- =========================
 CREATE TABLE credit_accounts (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL UNIQUE
     REFERENCES users(id) ON DELETE RESTRICT,
   credit_limit INTEGER NOT NULL CHECK (credit_limit >= 0),
@@ -42,7 +42,7 @@ CREATE TABLE credit_accounts (
 -- invoices
 -- =========================
 CREATE TABLE invoices (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL
     REFERENCES users(id) ON DELETE RESTRICT,
   period_start DATE NOT NULL,
@@ -67,7 +67,7 @@ CREATE TABLE invoices (
 -- transactions
 -- =========================
 CREATE TABLE transactions (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL
     REFERENCES users(id) ON DELETE RESTRICT,
   merchant_id UUID NOT NULL
@@ -89,7 +89,7 @@ CREATE TABLE transactions (
 -- invoice_items
 -- =========================
 CREATE TABLE invoice_items (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   invoice_id UUID NOT NULL
     REFERENCES invoices(id) ON DELETE CASCADE,
   transaction_id UUID NOT NULL
@@ -105,7 +105,7 @@ CREATE TABLE invoice_items (
 -- payments
 -- =========================
 CREATE TABLE payments (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   invoice_id UUID NOT NULL
     REFERENCES invoices(id) ON DELETE RESTRICT,
   provider TEXT NOT NULL,
@@ -120,7 +120,7 @@ CREATE TABLE payments (
 -- ledger_entries
 -- =========================
 CREATE TABLE ledger_entries (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL
     REFERENCES users(id) ON DELETE RESTRICT,
   type ledger_entry_type NOT NULL,
@@ -144,7 +144,7 @@ WHERE transaction_id IS NOT NULL;
 -- audit_logs
 -- =========================
 CREATE TABLE audit_logs (
-  id UUID PRIMARY KEY,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   actor_type audit_actor_type NOT NULL,
   actor_id UUID NOT NULL,
   action TEXT NOT NULL,
