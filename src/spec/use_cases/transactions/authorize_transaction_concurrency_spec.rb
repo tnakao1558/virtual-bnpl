@@ -4,8 +4,6 @@ require 'spec_helper'
 require 'securerandom'
 
 RSpec.describe UseCases::Transactions::AuthorizeTransaction, type: :model do
-  # Disable transactional fixtures for this spec to test real database transactions
-  self.use_transactional_tests = false
 
   let(:user) { create_user }
   let(:merchant) { create_merchant }
