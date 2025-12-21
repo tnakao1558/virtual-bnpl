@@ -40,20 +40,17 @@ module UseCases
           # ④ 前提条件チェック
           validate_prerequisites(credit_account)
 
-          # ⑤ 利用可否チェック（予備チェック）
-          # CreditChecker は fail-fast の予備チェックのみ
-          # 最終的な権威は Ledger である
-          check_credit_availability(credit_account)
-
-          # ⑥ transaction 作成
+          # ⑤ transaction 作成
           transaction = create_transaction
 
-          # ⑦ ledger_entries 作成
+          # ⑥ ledger_entries 作成
           # 真実の源は Ledger
+          # 「枠を使った」という事実は LedgerEntry が成功した場合のみ成立する
           create_ledger_entry(transaction)
 
-          # ⑧ available_credit 更新と整合性検証
-          # Ledger から再計算し、更新後に即座に検証する
+          # ⑦ available_credit 更新と整合性検証
+          # Ledger から再計算し、枠超過チェックと整合性検証を行う
+          # 枠超過の場合は InsufficientCreditError を raise してトランザクション全体を rollback
           update_and_verify_available_credit(credit_account)
 
           # ⑨ audit_logs 作成
@@ -109,20 +106,7 @@ module UseCases
         )
       end
 
-      # ⑤ 利用可否チェック（予備チェック）
-      # CreditChecker は fail-fast の予備チェックのみ
-      # 最終的な権威は Ledger である
-      #
-      # @param credit_account [CreditAccount] 与信口座
-      # @raise [Exceptions::InsufficientCreditError] 利用不可（枠不足）の場合
-      def check_credit_availability(credit_account)
-        Domain::Credit::CreditChecker.check_available(
-          available_credit: credit_account.available_credit,
-          amount: amount
-        )
-      end
-
-      # ⑥ transaction 作成
+      # ⑤ transaction 作成
       # status = AUTHORIZED
       # currency = JPY
       # invoice_id = NULL
@@ -140,11 +124,12 @@ module UseCases
         )
       end
 
-      # ⑦ ledger_entries 作成
+      # ⑥ ledger_entries 作成
       # 真実の源は Ledger
       # type = AUTH_HOLD
       # amount_delta = -amount
       # transaction_id を紐付ける
+      # 「枠を使った」という事実は LedgerEntry が成功した場合のみ成立する
       #
       # @param transaction [Transaction] 取引
       def create_ledger_entry(transaction)
@@ -155,27 +140,39 @@ module UseCases
         )
       end
 
-      # ⑧ available_credit 更新と整合性検証
-      # Ledger から再計算した値と一致することを確認
-      # 不一致の場合はロールバック
+      # ⑦ available_credit 更新と整合性検証
+      # Ledger から再計算し、枠超過チェックと整合性検証を行う
+      # 枠超過の場合は InsufficientCreditError を raise してトランザクション全体を rollback
       #
       # @param credit_account [CreditAccount] 与信口座
+      # @raise [Exceptions::InsufficientCreditError] 枠超過の場合
       # @raise [Exceptions::IntegrityError] 整合性が取れない場合
       def update_and_verify_available_credit(credit_account)
         # Ledger から再計算（真実の源）
         # CreditCalculator は生の計算値を返す（正規化なし）
+        # LedgerEntry 作成後の値なので、既に amount が減算されている
         calculated_credit = Domain::Credit::CreditCalculator.calculate_available(
           user_id:,
           credit_limit: credit_account.credit_limit
         )
 
+        # 枠超過チェック：計算後の利用可能額が負の値または要求額より少ない場合
+        # これは LedgerEntry 作成後の値なので、枠超過を意味する
+        if calculated_credit < 0
+          raise Exceptions::InsufficientCreditError.new(
+            available_credit: calculated_credit,
+            amount: amount,
+            message: "Insufficient credit after ledger entry: available=#{calculated_credit}, required=#{amount}"
+          )
+        end
+
         # 整合性検証：計算値が有効な範囲内であることを確認
-        # 範囲外の値は整合性違反として扱う（clamp で隠さない）
-        if calculated_credit < 0 || calculated_credit > credit_account.credit_limit
+        # credit_limit を超える値は整合性違反として扱う（clamp で隠さない）
+        if calculated_credit > credit_account.credit_limit
           raise Exceptions::IntegrityError.new(
             calculated_credit:,
             stored_credit: credit_account.available_credit,
-            message: "Calculated credit is out of valid range: #{calculated_credit} (must be 0..#{credit_account.credit_limit})"
+            message: "Calculated credit exceeds limit: #{calculated_credit} (limit: #{credit_account.credit_limit})"
           )
         end
 
