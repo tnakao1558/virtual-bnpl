@@ -20,10 +20,10 @@ module Domain
       # @param credit_limit [Integer] 与信枠
       # @return [Integer] 計算された利用可能額（生の値、正規化なし）
       def self.calculate_available(user_id:, credit_limit:)
-        # Ledger の合計を計算（ロック付き）
+        # Ledger の合計を計算
         # amount_delta の合計が負の値なら利用枠が減っている
-        # lock により並行実行時に最新の ledger_sum を取得できる
-        ledger_sum = LedgerEntry.where(user_id:).lock.sum(:amount_delta)
+        # 並行制御は UseCase 層の CreditAccount.lock に一本化されている
+        ledger_sum = LedgerEntry.where(user_id:).sum(:amount_delta)
 
         # available_credit = credit_limit + ledger_sum
         # ledger_sum は負の値（AUTH_HOLD: -amount）なので、結果的に credit_limit から減算される
