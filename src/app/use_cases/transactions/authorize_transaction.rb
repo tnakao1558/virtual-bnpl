@@ -172,10 +172,11 @@ module UseCases
         # 整合性検証：計算値が有効な範囲内であることを確認
         # 範囲外の値は整合性違反として扱う（clamp で隠さない）
         if calculated_credit < 0 || calculated_credit > credit_account.credit_limit
-          raise Exceptions::IntegrityError,
-                calculated_credit:,
-                stored_credit: credit_account.available_credit,
-                message: "Calculated credit is out of valid range: #{calculated_credit} (must be 0..#{credit_account.credit_limit})"
+          raise Exceptions::IntegrityError.new(
+            calculated_credit:,
+            stored_credit: credit_account.available_credit,
+            message: "Calculated credit is out of valid range: #{calculated_credit} (must be 0..#{credit_account.credit_limit})"
+          )
         end
 
         # available_credit を更新
@@ -185,9 +186,10 @@ module UseCases
         # 更新後の stored 値が計算値と一致することを確認
         credit_account.reload
         if calculated_credit != credit_account.available_credit
-          raise Exceptions::IntegrityError,
-                calculated_credit:,
-                stored_credit: credit_account.available_credit
+          raise Exceptions::IntegrityError.new(
+            calculated_credit:,
+            stored_credit: credit_account.available_credit
+          )
         end
       end
 

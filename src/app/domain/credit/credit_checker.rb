@@ -24,9 +24,10 @@ module Domain
       def check_available
         return if @available_credit >= @amount
 
-        raise Exceptions::InsufficientCreditError,
-              available_credit: @available_credit,
-              amount: @amount
+        raise Exceptions::InsufficientCreditError.new(
+          available_credit: @available_credit,
+          amount: @amount
+        )
       end
     end
   end
