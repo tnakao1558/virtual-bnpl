@@ -14,6 +14,8 @@ module Domain
         new(available_credit:, amount:).check_available
       end
 
+      private_class_method :new
+
       def initialize(available_credit:, amount:)
         @available_credit = available_credit
         @amount = amount
