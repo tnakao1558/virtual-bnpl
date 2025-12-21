@@ -135,6 +135,11 @@ CREATE TABLE ledger_entries (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 二重記帳防止（transaction 起点）
+CREATE UNIQUE INDEX uniq_ledger_entries_transaction_type
+ON ledger_entries (transaction_id, type)
+WHERE transaction_id IS NOT NULL;
+
 -- =========================
 -- audit_logs
 -- =========================
