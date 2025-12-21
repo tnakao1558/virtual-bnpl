@@ -1,63 +1,310 @@
 # frozen_string_literal: true
 
-module Validators
-  class TransactionValidator
-    # authorizeTransaction の前提条件をチェック
-    #
-    # チェック項目：
-    # - users.status = ACTIVE
-    # - credit_accounts.status = ACTIVE
-    # - OVERDUE 状態の invoice が存在しない
-    #
-    # @param user_id [UUID] ユーザーID
-    # @param credit_account [CreditAccount] 与信口座
-    # @param merchant_id [UUID] 加盟店ID
-    # @raise [Exceptions::InvalidStateError] 前提条件を満たさない場合
-    def self.validate_authorize(user_id:, credit_account:, merchant_id:)
-      new(user_id:, credit_account:, merchant_id:).validate_authorize
-    end
+require 'spec_helper'
+require 'securerandom'
 
-    def initialize(user_id:, credit_account:, merchant_id:)
-      @user_id = user_id
-      @credit_account = credit_account
-      @merchant_id = merchant_id
-    end
+RSpec.describe UseCases::Transactions::AuthorizeTransaction, type: :model do
 
-    def validate_authorize
-      validate_user_status
-      validate_credit_account_status
-      validate_no_overdue_invoices
-    end
+  let(:user) { create_user }
+  let(:merchant) { create_merchant }
+  let(:credit_account) { create_credit_account(user:, credit_limit: 1000, available_credit: 1000) }
 
-    private
+  before(:each) do
+    clean_database
+  end
 
-    attr_reader :user_id, :credit_account, :merchant_id
+  before do
+    # Ensure credit account exists and is in correct state
+    credit_account
+  end
 
-    # users.status = ACTIVE をチェック
-    def validate_user_status
-      user = credit_account.user
-      return if user.status == 'ACTIVE'
+  after(:all) do
+    clean_database
+  end
 
-      raise Exceptions::InvalidStateError,
-            "User status must be ACTIVE, but got #{user.status}"
-    end
+  describe 'when concurrent authorization exceeds credit limit' do
+    it 'allows only one transaction to succeed' do
+      # Prepare synchronization primitives
+      # ready_queue: threads signal when they are ready
+      # start_queue: main thread signals when to start
+      ready_queue = Queue.new
+      start_queue = Queue.new
+      results = Queue.new
+      errors = Queue.new
 
-    # credit_accounts.status = ACTIVE をチェック
-    def validate_credit_account_status
-      return if credit_account.status == 'ACTIVE'
+      # Thread A: authorizeTransaction(amount: 600)
+      thread_a = Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          # Signal that thread is ready
+          ready_queue.push(:ready)
+          # Wait for start signal
+          start_queue.pop
+          begin
+            transaction = UseCases::Transactions::AuthorizeTransaction.call(
+              user_id: user.id,
+              merchant_id: merchant.id,
+              amount: 600,
+              idempotency_key: SecureRandom.uuid
+            )
+            results.push({ thread: 'A', success: true, transaction_id: transaction.id })
+          rescue Exceptions::InsufficientCreditError => e
+            errors.push({ thread: 'A', error: 'InsufficientCreditError', message: e.message })
+          rescue Exceptions::IntegrityError => e
+            errors.push({ thread: 'A', error: 'IntegrityError', message: e.message })
+          rescue StandardError => e
+            # Unexpected errors must fail the test
+            errors.push({ thread: 'A', error: e.class.name, message: e.message, unexpected: true })
+          end
+        end
+      end
 
-      raise Exceptions::InvalidStateError,
-            "Credit account status must be ACTIVE, but got #{credit_account.status}"
-    end
+      # Thread B: authorizeTransaction(amount: 600)
+      thread_b = Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          # Signal that thread is ready
+          ready_queue.push(:ready)
+          # Wait for start signal
+          start_queue.pop
+          begin
+            transaction = UseCases::Transactions::AuthorizeTransaction.call(
+              user_id: user.id,
+              merchant_id: merchant.id,
+              amount: 600,
+              idempotency_key: SecureRandom.uuid
+            )
+            results.push({ thread: 'B', success: true, transaction_id: transaction.id })
+          rescue Exceptions::InsufficientCreditError => e
+            errors.push({ thread: 'B', error: 'InsufficientCreditError', message: e.message })
+          rescue Exceptions::IntegrityError => e
+            errors.push({ thread: 'B', error: 'IntegrityError', message: e.message })
+          rescue StandardError => e
+            # Unexpected errors must fail the test
+            errors.push({ thread: 'B', error: e.class.name, message: e.message, unexpected: true })
+          end
+        end
+      end
 
-    # OVERDUE 状態の invoice が存在しないことをチェック
-    def validate_no_overdue_invoices
-      overdue_invoice = Invoice.by_user(user_id).overdue.exists?
-      return unless overdue_invoice
+      # Wait for both threads to be ready
+      ready_queue.pop
+      ready_queue.pop
 
-      raise Exceptions::InvalidStateError,
-            'Cannot authorize transaction: user has OVERDUE invoice'
+      # Start both threads simultaneously
+      start_queue.push(:start)
+      start_queue.push(:start)
+
+      # Wait for both threads to complete
+      thread_a.join
+      thread_b.join
+
+      # Collect results
+      result_array = []
+      error_array = []
+      # Pop all results (non_blocking to avoid hanging)
+      loop do
+        result = results.pop(true) rescue nil
+        break unless result
+        result_array << result
+      end
+      loop do
+        error = errors.pop(true) rescue nil
+        break unless error
+        error_array << error
+      end
+
+      success_count = result_array.size
+      error_count = error_array.size
+
+      # Check for unexpected errors first (must fail the test)
+      unexpected_errors = error_array.select { |e| e[:unexpected] }
+      if unexpected_errors.any?
+        fail "Unexpected errors occurred: #{unexpected_errors.map { |e| "#{e[:thread]}: #{e[:error]} - #{e[:message]}" }.join(', ')}"
+      end
+
+      # Verify all errors are expected types
+      error_array.each do |error|
+        expect(['InsufficientCreditError', 'IntegrityError']).to include(error[:error]),
+                                                                  "Unexpected error type: #{error[:error]} from thread #{error[:thread]}"
+      end
+
+      # Assertions
+      expect(success_count).to eq(1), "Expected exactly 1 success, got #{success_count}. Errors: #{error_array}"
+      expect(error_count).to eq(1), "Expected exactly 1 error, got #{error_count}"
+
+      # Verify database state
+      expect(Transaction.count).to eq(1), 'Expected exactly 1 transaction'
+      expect(LedgerEntry.count).to eq(1), 'Expected exactly 1 ledger entry'
+
+      ledger_entry = LedgerEntry.first
+      expect(ledger_entry.type).to eq('AUTH_HOLD'), 'Expected ledger entry type to be AUTH_HOLD'
+      expect(ledger_entry.amount_delta).to eq(-600), 'Expected ledger entry amount_delta to be -600'
+
+      # Reload credit account and verify available_credit
+      credit_account.reload
+      expect(credit_account.available_credit).to eq(400), 'Expected available_credit to be 400'
+
+      # Verify Ledger-derived available_credit matches credit_accounts.available_credit
+      calculated_credit = Domain::Credit::CreditCalculator.calculate_available(
+        user_id: user.id,
+        credit_limit: credit_account.credit_limit
+      )
+      expect(calculated_credit).to eq(credit_account.available_credit),
+                                   "Ledger-derived credit (#{calculated_credit}) must match stored credit (#{credit_account.available_credit})"
     end
   end
-end
 
+  describe 'when concurrent authorization uses same idempotency key' do
+    it 'creates only one transaction and returns same transaction ID' do
+      idempotency_key = SecureRandom.uuid
+
+      # Prepare synchronization primitives
+      # ready_queue: threads signal when they are ready
+      # start_queue: main thread signals when to start
+      ready_queue = Queue.new
+      start_queue = Queue.new
+      results = Queue.new
+      errors = Queue.new
+
+      # Thread A: authorizeTransaction with idempotency_key
+      thread_a = Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          # Signal that thread is ready
+          ready_queue.push(:ready)
+          # Wait for start signal
+          start_queue.pop
+          begin
+            transaction = UseCases::Transactions::AuthorizeTransaction.call(
+              user_id: user.id,
+              merchant_id: merchant.id,
+              amount: 500,
+              idempotency_key:
+            )
+            results.push({ thread: 'A', success: true, transaction_id: transaction.id })
+          rescue StandardError => e
+            errors.push({ thread: 'A', error: e.class.name, message: e.message })
+          end
+        end
+      end
+
+      # Thread B: authorizeTransaction with same idempotency_key
+      thread_b = Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          # Signal that thread is ready
+          ready_queue.push(:ready)
+          # Wait for start signal
+          start_queue.pop
+          begin
+            transaction = UseCases::Transactions::AuthorizeTransaction.call(
+              user_id: user.id,
+              merchant_id: merchant.id,
+              amount: 500,
+              idempotency_key:
+            )
+            results.push({ thread: 'B', success: true, transaction_id: transaction.id })
+          rescue StandardError => e
+            errors.push({ thread: 'B', error: e.class.name, message: e.message })
+          end
+        end
+      end
+
+      # Wait for both threads to be ready
+      ready_queue.pop
+      ready_queue.pop
+
+      # Start both threads simultaneously
+      start_queue.push(:start)
+      start_queue.push(:start)
+
+      # Wait for both threads to complete
+      thread_a.join
+      thread_b.join
+
+      # Collect results
+      result_array = []
+      error_array = []
+      # Pop all results (non_blocking to avoid hanging)
+      loop do
+        result = results.pop(true) rescue nil
+        break unless result
+        result_array << result
+      end
+      loop do
+        error = errors.pop(true) rescue nil
+        break unless error
+        error_array << error
+      end
+
+      # Assertions
+      expect(error_array).to be_empty, "Expected no errors, got: #{error_array}"
+      expect(result_array.size).to eq(2), "Expected 2 successful results, got #{result_array.size}"
+
+      # Both threads must return the same transaction ID
+      transaction_ids = result_array.map { |r| r[:transaction_id] }
+      expect(transaction_ids.uniq.size).to eq(1),
+                                          "Expected both threads to return same transaction ID, got: #{transaction_ids}"
+
+      # Verify database state
+      expect(Transaction.count).to eq(1), 'Expected exactly 1 transaction'
+      expect(LedgerEntry.count).to eq(1), 'Expected exactly 1 ledger entry'
+
+      # Verify the transaction has the correct idempotency_key
+      transaction = Transaction.first
+      expect(transaction.idempotency_key).to eq(idempotency_key)
+      expect(transaction.amount).to eq(500)
+
+      # Verify available_credit
+      credit_account.reload
+      expect(credit_account.available_credit).to eq(500), 'Expected available_credit to be 500'
+
+      # Verify Ledger-derived available_credit matches
+      calculated_credit = Domain::Credit::CreditCalculator.calculate_available(
+        user_id: user.id,
+        credit_limit: credit_account.credit_limit
+      )
+      expect(calculated_credit).to eq(credit_account.available_credit),
+                                   "Ledger-derived credit (#{calculated_credit}) must match stored credit (#{credit_account.available_credit})"
+    end
+  end
+
+  private
+
+  def create_user
+    User.create!(
+      id: SecureRandom.uuid,
+      email: "user_#{SecureRandom.hex(8)}@example.com",
+      status: 'ACTIVE',
+      mfa_enabled: false
+    )
+  end
+
+  def create_merchant
+    Merchant.create!(
+      id: SecureRandom.uuid,
+      name: "Merchant #{SecureRandom.hex(8)}",
+      status: 'ACTIVE'
+    )
+  end
+
+  def create_credit_account(user:, credit_limit:, available_credit:)
+    CreditAccount.create!(
+      id: SecureRandom.uuid,
+      user_id: user.id,
+      credit_limit:,
+      available_credit:,
+      status: 'ACTIVE'
+    )
+  end
+
+  def clean_database
+    # Clean up test data
+    # Delete order must respect foreign key constraints:
+    # - LedgerEntry references Transaction (ON DELETE RESTRICT)
+    # - CreditAccount references User (ON DELETE RESTRICT)
+    # Delete LedgerEntry BEFORE Transaction to avoid FK constraint violation
+    LedgerEntry.delete_all
+    Transaction.delete_all
+    AuditLog.delete_all
+    CreditAccount.delete_all
+    Merchant.delete_all
+    User.delete_all
+  end
+end
