@@ -150,7 +150,7 @@ module UseCases
       def create_ledger_entry(transaction)
         Writers::LedgerWriter.create_auth_hold(
           user_id:,
-          transaction:,
+          transaction_id: transaction.id,
           amount:
         )
       end
