@@ -40,20 +40,28 @@ module UseCases
           # ④ 前提条件チェック
           validate_prerequisites(credit_account)
 
-          # ⑤ 利用可否チェック
-          # TODO: 実装予定
+          # ⑤ 利用可否チェック（予備チェック）
+          # CreditChecker は fail-fast の予備チェックのみ
+          # 最終的な権威は Ledger である
+          check_credit_availability(credit_account)
 
           # ⑥ transaction 作成
-          # TODO: 実装予定
+          transaction = create_transaction
 
           # ⑦ ledger_entries 作成
-          # TODO: 実装予定
+          # 真実の源は Ledger
+          create_ledger_entry(transaction)
 
-          # ⑧ available_credit 更新
-          # TODO: 実装予定
+          # ⑧ available_credit 更新と整合性検証
+          # Ledger から再計算し、更新後に即座に検証する
+          update_and_verify_available_credit(credit_account)
 
           # ⑨ audit_logs 作成
-          # TODO: 実装予定
+          # action = TRANSACTION_AUTHORIZED
+          # 金額・対象・actor を metadata に記録
+          create_audit_log(transaction)
+
+          transaction
 
           # ⑩ コミット
           # 途中で失敗した場合は必ずロールバック（ActiveRecord が自動処理）
@@ -98,6 +106,101 @@ module UseCases
           user_id:,
           credit_account:,
           merchant_id:
+        )
+      end
+
+      # ⑤ 利用可否チェック（予備チェック）
+      # CreditChecker は fail-fast の予備チェックのみ
+      # 最終的な権威は Ledger である
+      #
+      # @param credit_account [CreditAccount] 与信口座
+      # @raise [Exceptions::InsufficientCreditError] 利用不可（枠不足）の場合
+      def check_credit_availability(credit_account)
+        Domain::Credit::CreditChecker.check_available(
+          available_credit: credit_account.available_credit,
+          amount:
+        )
+      end
+
+      # ⑥ transaction 作成
+      # status = AUTHORIZED
+      # currency = JPY
+      # invoice_id = NULL
+      #
+      # @return [Transaction] 作成された取引
+      def create_transaction
+        Transaction.create!(
+          user_id:,
+          merchant_id:,
+          amount:,
+          currency: 'JPY',
+          status: 'AUTHORIZED',
+          idempotency_key:,
+          invoice_id: nil
+        )
+      end
+
+      # ⑦ ledger_entries 作成
+      # 真実の源は Ledger
+      # type = AUTH_HOLD
+      # amount_delta = -amount
+      # transaction_id を紐付ける
+      #
+      # @param transaction [Transaction] 取引
+      def create_ledger_entry(transaction)
+        Writers::LedgerWriter.create_auth_hold(
+          user_id:,
+          transaction:,
+          amount:
+        )
+      end
+
+      # ⑧ available_credit 更新と整合性検証
+      # Ledger から再計算した値と一致することを確認
+      # 不一致の場合はロールバック
+      #
+      # @param credit_account [CreditAccount] 与信口座
+      # @raise [Exceptions::IntegrityError] 整合性が取れない場合
+      def update_and_verify_available_credit(credit_account)
+        # Ledger から再計算（真実の源）
+        # CreditCalculator は生の計算値を返す（正規化なし）
+        calculated_credit = Domain::Credit::CreditCalculator.calculate_available(
+          user_id:,
+          credit_limit: credit_account.credit_limit
+        )
+
+        # 整合性検証：計算値が有効な範囲内であることを確認
+        # 範囲外の値は整合性違反として扱う（clamp で隠さない）
+        if calculated_credit < 0 || calculated_credit > credit_account.credit_limit
+          raise Exceptions::IntegrityError,
+                calculated_credit:,
+                stored_credit: credit_account.available_credit,
+                message: "Calculated credit is out of valid range: #{calculated_credit} (must be 0..#{credit_account.credit_limit})"
+        end
+
+        # available_credit を更新
+        credit_account.update!(available_credit: calculated_credit)
+
+        # 更新後に即座に検証
+        # 更新後の stored 値が計算値と一致することを確認
+        credit_account.reload
+        if calculated_credit != credit_account.available_credit
+          raise Exceptions::IntegrityError,
+                calculated_credit:,
+                stored_credit: credit_account.available_credit
+        end
+      end
+
+      # ⑨ audit_logs 作成
+      # action = TRANSACTION_AUTHORIZED
+      # 金額・対象・actor を metadata に記録
+      #
+      # @param transaction [Transaction] 取引
+      def create_audit_log(transaction)
+        Writers::AuditLogger.log_transaction_authorized(
+          transaction:,
+          actor_type: 'USER',
+          actor_id: user_id
         )
       end
     end
