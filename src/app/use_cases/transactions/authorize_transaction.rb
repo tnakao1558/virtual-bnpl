@@ -118,7 +118,7 @@ module UseCases
       def check_credit_availability(credit_account)
         Domain::Credit::CreditChecker.check_available(
           available_credit: credit_account.available_credit,
-          amount:
+          amount: amount
         )
       end
 

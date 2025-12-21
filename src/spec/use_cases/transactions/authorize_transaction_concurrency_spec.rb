@@ -16,8 +16,12 @@ RSpec.describe UseCases::Transactions::AuthorizeTransaction, type: :model do
 
   after(:all) do
     # Clean up test data after all examples
-    Transaction.delete_all
+    # Delete order must respect foreign key constraints:
+    # - LedgerEntry references Transaction (ON DELETE RESTRICT)
+    # - CreditAccount references User (ON DELETE RESTRICT)
+    # Delete LedgerEntry BEFORE Transaction to avoid FK constraint violation
     LedgerEntry.delete_all
+    Transaction.delete_all
     AuditLog.delete_all
     CreditAccount.delete_all
     Merchant.delete_all
