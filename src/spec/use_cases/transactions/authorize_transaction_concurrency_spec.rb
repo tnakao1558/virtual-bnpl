@@ -9,23 +9,17 @@ RSpec.describe UseCases::Transactions::AuthorizeTransaction, type: :model do
   let(:merchant) { create_merchant }
   let(:credit_account) { create_credit_account(user:, credit_limit: 1000, available_credit: 1000) }
 
+  before(:each) do
+    clean_database
+  end
+
   before do
     # Ensure credit account exists and is in correct state
     credit_account
   end
 
   after(:all) do
-    # Clean up test data after all examples
-    # Delete order must respect foreign key constraints:
-    # - LedgerEntry references Transaction (ON DELETE RESTRICT)
-    # - CreditAccount references User (ON DELETE RESTRICT)
-    # Delete LedgerEntry BEFORE Transaction to avoid FK constraint violation
-    LedgerEntry.delete_all
-    Transaction.delete_all
-    AuditLog.delete_all
-    CreditAccount.delete_all
-    Merchant.delete_all
-    User.delete_all
+    clean_database
   end
 
   describe 'when concurrent authorization exceeds credit limit' do
@@ -298,6 +292,20 @@ RSpec.describe UseCases::Transactions::AuthorizeTransaction, type: :model do
       available_credit:,
       status: 'ACTIVE'
     )
+  end
+
+  def clean_database
+    # Clean up test data
+    # Delete order must respect foreign key constraints:
+    # - LedgerEntry references Transaction (ON DELETE RESTRICT)
+    # - CreditAccount references User (ON DELETE RESTRICT)
+    # Delete LedgerEntry BEFORE Transaction to avoid FK constraint violation
+    LedgerEntry.delete_all
+    Transaction.delete_all
+    AuditLog.delete_all
+    CreditAccount.delete_all
+    Merchant.delete_all
+    User.delete_all
   end
 end
 
